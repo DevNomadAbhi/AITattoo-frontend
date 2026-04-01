@@ -28,15 +28,35 @@
     "plugins": [
       "expo-router",
       [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow TattooApp to access your camera so you can preview tattoo placement live."
+        }
+      ],
+      [
         "expo-splash-screen",
         {
-          "image": "./assets/images/splash-icon.png",
-          "imageWidth": 200,
+          "image": "./assets/images/tattoo_hunter_crop.png",
+          "imageWidth": 280,
           "resizeMode": "contain",
-          "backgroundColor": "#ffffff",
+          "backgroundColor": "#0d0907",
           "dark": {
-            "backgroundColor": "#000000"
+            "backgroundColor": "#0d0907"
           }
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow the app to access your photos to try on tattoos."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Allow TattooApp to access your photo library when saving tattoo previews.",
+          "savePhotosPermission": "Allow TattooApp to save captured tattoo previews to your photo library.",
+          "granularPermissions": ["photo"]
         }
       ]
     ],

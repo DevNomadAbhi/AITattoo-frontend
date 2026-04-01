@@ -37,6 +37,7 @@ const styles = StyleSheet.create({
   default: {
     fontSize: 16,
     lineHeight: 24,
+    fontWeight: '500',
   },
   defaultSemiBold: {
     fontSize: 16,
@@ -55,6 +56,7 @@ const styles = StyleSheet.create({
   link: {
     lineHeight: 30,
     fontSize: 16,
+    fontWeight: '500',
     color: '#0a7ea4',
   },
 });
