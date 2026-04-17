@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "914863598868",
+    "project_id": "tattoo-hunter-35f6b",
+    "storage_bucket": "tattoo-hunter-35f6b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:914863598868:android:3b22a92fad8e5ca5f7a601",
+        "android_client_info": {
+          "package_name": "com.abhiconexus.TattooHunter"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "914863598868-f859cmf86461rdu51hv04v00oslq2iti.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.abhiconexus.TattooHunter",
+            "certificate_hash": "5e8f16062ea3cd2c4a0d547876baa6f38cabf625"
+          }
+        },
+        {
+          "client_id": "914863598868-2nu5em7ne375u8ue97eu0peud8cvt3bp.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDhAMd4tzxGe1jVbRgO2_vYDFTtm5K9lH4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "914863598868-2nu5em7ne375u8ue97eu0peud8cvt3bp.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

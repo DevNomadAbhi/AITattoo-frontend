@@ -1,5 +1,7 @@
+import { Fonts } from "@/constants/theme";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import Constants from "expo-constants";
+import * as FileSystem from "expo-file-system/legacy";
 import * as MediaLibrary from "expo-media-library";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import * as Sharing from "expo-sharing";
@@ -7,9 +9,9 @@ import { useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
-  Image as RNImage,
   Platform,
   Pressable,
+  Image as RNImage,
   StyleSheet,
   Text,
   TextInput,
@@ -24,24 +26,25 @@ import {
   renameSavedTattoo,
   SavedTattoo,
 } from "@/lib/selected-tattoo";
+import { subscriptionService } from "@/lib/subscription";
 
 type PreviewAction = "delete" | "download" | "rename" | "share" | null;
 type PreviewItem = SavedTattoo;
 
-function getShareMetadata(uri: string) {
-  const normalizedUri = uri.toLowerCase();
-
-  if (normalizedUri.endsWith(".jpg") || normalizedUri.endsWith(".jpeg")) {
-    return {
-      mimeType: "image/jpeg",
-      UTI: "public.jpeg",
-    };
+async function ensureLocalFileUri(uri: string) {
+  if (uri.startsWith("file://")) {
+    return uri;
   }
 
-  return {
-    mimeType: "image/png",
-    UTI: "public.png",
-  };
+  const extension = uri.toLowerCase().includes(".png") ? "png" : "jpg";
+  const targetUri = `${FileSystem.cacheDirectory}shared-preview-${Date.now()}.${extension}`;
+  const downloadResult = await FileSystem.downloadAsync(uri, targetUri);
+
+  if (downloadResult.status < 200 || downloadResult.status >= 300) {
+    throw new Error("Failed to prepare image for sharing.");
+  }
+
+  return downloadResult.uri;
 }
 
 export default function SavedPreviewScreen() {
@@ -54,9 +57,9 @@ export default function SavedPreviewScreen() {
   const [action, setAction] = useState<PreviewAction>(null);
   const [displayUri, setDisplayUri] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
-  const [imageStatus, setImageStatus] = useState<"error" | "loaded" | "loading">(
-    "loading",
-  );
+  const [imageStatus, setImageStatus] = useState<
+    "error" | "loaded" | "loading"
+  >("loading");
   const [isEditing, setIsEditing] = useState(false);
   const [item, setItem] = useState<PreviewItem | null>(null);
   const [loading, setLoading] = useState(true);
@@ -65,7 +68,9 @@ export default function SavedPreviewScreen() {
   const fallbackImageUri = Array.isArray(params.imageUri)
     ? params.imageUri[0]
     : params.imageUri;
-  const fallbackTitle = Array.isArray(params.title) ? params.title[0] : params.title;
+  const fallbackTitle = Array.isArray(params.title)
+    ? params.title[0]
+    : params.title;
   const isExpoGoAndroid =
     Platform.OS === "android" &&
     Constants.executionEnvironment === "storeClient";
@@ -157,19 +162,35 @@ export default function SavedPreviewScreen() {
       return;
     }
 
+    // Check subscription for share access
+    const hasProAccess = await subscriptionService.hasProAccess();
+    if (!hasProAccess) {
+      Alert.alert(
+        "PRO Feature Required",
+        "Sharing tattoo previews is a PRO feature. Upgrade to unlock sharing and HD downloads.",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Upgrade to PRO",
+            onPress: () => {
+              router.push("/(tabs)/profile");
+            },
+          },
+        ],
+      );
+      return;
+    }
+
     try {
       setAction("share");
       const shareAvailable = await Sharing.isAvailableAsync();
-
       if (!shareAvailable) {
         throw new Error("Sharing is not available on this device.");
       }
 
-      const shareMetadata = getShareMetadata(displayUri);
+      const localShareUri = await ensureLocalFileUri(displayUri);
       await notifyInfo("Opening share sheet.");
-      await Sharing.shareAsync(displayUri, {
-        mimeType: shareMetadata.mimeType,
-        UTI: shareMetadata.UTI,
+      await Sharing.shareAsync(localShareUri, {
         dialogTitle: item?.name ?? "Preview",
       });
     } catch (error) {
@@ -191,6 +212,25 @@ export default function SavedPreviewScreen() {
       return;
     }
 
+    // Check subscription for download access
+    const hasProAccess = await subscriptionService.hasProAccess();
+    if (!hasProAccess) {
+      Alert.alert(
+        "PRO Feature Required",
+        "Downloading tattoo previews is a PRO feature. Upgrade to unlock HD downloads and sharing.",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Upgrade to PRO",
+            onPress: () => {
+              router.push("/(tabs)/profile");
+            },
+          },
+        ],
+      );
+      return;
+    }
+
     try {
       setAction("download");
 
@@ -204,7 +244,9 @@ export default function SavedPreviewScreen() {
 
       const mediaLibraryAvailable = await MediaLibrary.isAvailableAsync();
       if (!mediaLibraryAvailable) {
-        throw new Error("Photo library access is not available on this device.");
+        throw new Error(
+          "Photo library access is not available on this device.",
+        );
       }
 
       const permissionResponse = await MediaLibrary.requestPermissionsAsync(
@@ -220,8 +262,9 @@ export default function SavedPreviewScreen() {
         return;
       }
 
-      await MediaLibrary.saveToLibraryAsync(displayUri);
-      await notifySuccess("Preview downloaded to your photos.", "Saved");
+      const localDownloadUri = await ensureLocalFileUri(displayUri);
+      await MediaLibrary.saveToLibraryAsync(localDownloadUri);
+      await notifySuccess("HD preview downloaded to your photos.", "Saved");
     } catch (error) {
       console.error("Download failed", error);
       await notifyError("Preview download failed.", "Download failed");
@@ -347,7 +390,8 @@ export default function SavedPreviewScreen() {
               onPress={() => {
                 setDraftName(item.name);
                 setIsEditing(false);
-              }}>
+              }}
+            >
               <Text style={styles.secondaryButtonText}>Cancel</Text>
             </Pressable>
             <Pressable
@@ -356,7 +400,8 @@ export default function SavedPreviewScreen() {
                 action === "rename" ? styles.buttonDisabled : null,
               ]}
               onPress={handleRename}
-              disabled={action === "rename"}>
+              disabled={action === "rename"}
+            >
               <Text style={styles.primaryButtonText}>Save Name</Text>
             </Pressable>
           </View>
@@ -399,7 +444,8 @@ export default function SavedPreviewScreen() {
               action ? styles.buttonDisabled : null,
             ]}
             onPress={handleShare}
-            disabled={Boolean(action)}>
+            disabled={Boolean(action)}
+          >
             <Ionicons name="share-social-outline" size={18} color="#1F160F" />
             <Text style={styles.primaryActionText}>Share</Text>
           </Pressable>
@@ -409,7 +455,8 @@ export default function SavedPreviewScreen() {
               action ? styles.buttonDisabled : null,
             ]}
             onPress={handleDownload}
-            disabled={Boolean(action)}>
+            disabled={Boolean(action)}
+          >
             <Ionicons name="download-outline" size={18} color="#1F160F" />
             <Text style={styles.primaryActionText}>Download</Text>
           </Pressable>
@@ -421,7 +468,8 @@ export default function SavedPreviewScreen() {
               !isStoredItem ? styles.buttonDisabled : null,
             ]}
             onPress={() => setIsEditing(true)}
-            disabled={!isStoredItem}>
+            disabled={!isStoredItem}
+          >
             <Ionicons name="create-outline" size={17} color="#FFF4E5" />
             <Text style={styles.secondaryPillText}>Rename</Text>
           </Pressable>
@@ -429,10 +477,13 @@ export default function SavedPreviewScreen() {
             style={[
               styles.secondaryActionPill,
               styles.deletePill,
-              !isStoredItem || action === "delete" ? styles.buttonDisabled : null,
+              !isStoredItem || action === "delete"
+                ? styles.buttonDisabled
+                : null,
             ]}
             onPress={handleDelete}
-            disabled={!isStoredItem || action === "delete"}>
+            disabled={!isStoredItem || action === "delete"}
+          >
             <Ionicons name="trash-outline" size={17} color="#FFDCCF" />
             <Text style={styles.deletePillText}>Delete</Text>
           </Pressable>
@@ -447,6 +498,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#0D0907",
     paddingBottom: 16,
+    fontFamily: Fonts.fredoka,
   },
   header: {
     flexDirection: "row",
@@ -456,6 +508,7 @@ const styles = StyleSheet.create({
     paddingTop: 8,
     paddingBottom: 12,
     gap: 12,
+    fontFamily: Fonts.fredoka,
   },
   iconButton: {
     width: 44,
@@ -466,10 +519,12 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255, 255, 255, 0.08)",
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.12)",
+    fontFamily: Fonts.fredoka,
   },
   iconSpacer: {
     width: 44,
     height: 44,
+    fontFamily: Fonts.fredoka,
   },
   title: {
     flex: 1,
@@ -477,6 +532,7 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: "700",
     textAlign: "center",
+    fontFamily: Fonts.fredoka,
   },
   detailCard: {
     marginHorizontal: 16,
@@ -488,6 +544,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 14,
     gap: 4,
+    fontFamily: Fonts.fredoka,
   },
   detailLabel: {
     color: "#A78F73",
@@ -495,17 +552,20 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     textTransform: "uppercase",
     letterSpacing: 0.8,
+    fontFamily: Fonts.fredoka,
   },
   detailName: {
     color: "#FFF4E5",
     fontSize: 20,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   detailMeta: {
     color: "rgba(255, 244, 229, 0.72)",
     fontSize: 13,
     lineHeight: 18,
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
   },
   renameCard: {
     marginHorizontal: 16,
@@ -516,11 +576,13 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255, 255, 255, 0.08)",
     padding: 14,
     gap: 12,
+    fontFamily: Fonts.fredoka,
   },
   renameLabel: {
     color: "#FFF4E5",
     fontSize: 14,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   renameInput: {
     minHeight: 52,
@@ -530,10 +592,12 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "500",
     paddingHorizontal: 14,
+    fontFamily: Fonts.fredoka,
   },
   renameActions: {
     flexDirection: "row",
     gap: 12,
+    fontFamily: Fonts.fredoka,
   },
   imageFrame: {
     flex: 1,
@@ -541,10 +605,12 @@ const styles = StyleSheet.create({
     backgroundColor: "#17110D",
     overflow: "hidden",
     position: "relative",
+    fontFamily: Fonts.fredoka,
   },
   image: {
     width: "100%",
     height: "100%",
+    fontFamily: Fonts.fredoka,
   },
   imageOverlay: {
     ...StyleSheet.absoluteFillObject,
@@ -553,15 +619,18 @@ const styles = StyleSheet.create({
     gap: 10,
     backgroundColor: "rgba(13, 9, 7, 0.94)",
     paddingHorizontal: 24,
+    fontFamily: Fonts.fredoka,
   },
   actionPanel: {
     gap: 10,
     paddingHorizontal: 16,
     paddingTop: 14,
+    fontFamily: Fonts.fredoka,
   },
   primaryActionRow: {
     flexDirection: "row",
     gap: 12,
+    fontFamily: Fonts.fredoka,
   },
   primaryActionButton: {
     flex: 1,
@@ -573,15 +642,18 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     backgroundColor: "#E9D1A7",
     paddingHorizontal: 16,
+    fontFamily: Fonts.fredoka,
   },
   primaryActionText: {
     color: "#1F160F",
     fontSize: 14,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   secondaryActionRow: {
     flexDirection: "row",
     gap: 12,
+    fontFamily: Fonts.fredoka,
   },
   secondaryActionPill: {
     flex: 1,
@@ -595,20 +667,24 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.1)",
     paddingHorizontal: 14,
+    fontFamily: Fonts.fredoka,
   },
   secondaryPillText: {
     color: "#FFF4E5",
     fontSize: 13,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   deletePill: {
     borderColor: "rgba(244, 125, 96, 0.22)",
     backgroundColor: "rgba(78, 27, 19, 0.55)",
+    fontFamily: Fonts.fredoka,
   },
   deletePillText: {
     color: "#FFDCCF",
     fontSize: 13,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   primaryButton: {
     flex: 1,
@@ -618,11 +694,13 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: "#E9D1A7",
     paddingHorizontal: 16,
+    fontFamily: Fonts.fredoka,
   },
   primaryButtonText: {
     color: "#1F160F",
     fontSize: 14,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   secondaryButton: {
     flex: 1,
@@ -634,14 +712,17 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.12)",
     paddingHorizontal: 16,
+    fontFamily: Fonts.fredoka,
   },
   secondaryButtonText: {
     color: "#FFF4E5",
     fontSize: 14,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   buttonDisabled: {
     opacity: 0.6,
+    fontFamily: Fonts.fredoka,
   },
   centerState: {
     flex: 1,
@@ -649,6 +730,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 12,
     paddingHorizontal: 28,
+    fontFamily: Fonts.fredoka,
   },
   centerText: {
     color: "rgba(255, 244, 229, 0.82)",
@@ -656,12 +738,14 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     textAlign: "center",
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
   },
   emptyTitle: {
     color: "#FFF4E5",
     fontSize: 24,
     fontWeight: "700",
     textAlign: "center",
+    fontFamily: Fonts.fredoka,
   },
   emptyText: {
     color: "rgba(255, 244, 229, 0.82)",
@@ -669,6 +753,7 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     textAlign: "center",
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
   },
   backButton: {
     minHeight: 48,
@@ -678,10 +763,12 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: "#E9D1A7",
     paddingHorizontal: 20,
+    fontFamily: Fonts.fredoka,
   },
   backButtonText: {
     color: "#1F160F",
     fontSize: 15,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
 });

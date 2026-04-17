@@ -1,44 +1,36 @@
+import { Fonts } from "@/constants/theme";
 import { useFocusEffect } from "@react-navigation/native";
 import { Image } from "expo-image";
 import { useRouter } from "expo-router";
 import { useCallback, useState } from "react";
 import {
   ActivityIndicator,
-  Alert,
   FlatList,
   Pressable,
   StyleSheet,
   Text,
-  View,
+  View
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import { notifyError, notifySuccess } from "@/lib/feedback";
-import {
-  getSavedTattoos,
-  removeSavedTattoo,
-  SavedTattoo,
-} from "@/lib/selected-tattoo";
+import { notifyError } from "@/lib/feedback";
+import { getSavedTattoosApiUseCase, SavedTattooEntry } from "@/lib/tattoo-api";
 
 export default function MyTattooScreen() {
   const router = useRouter();
-  const [items, setItems] = useState<SavedTattoo[]>([]);
+  const [items, setItems] = useState<SavedTattooEntry[]>([]);
   const [loading, setLoading] = useState(true);
 
   const loadItems = useCallback(async () => {
     try {
       setLoading(true);
-      const savedTattoos = await getSavedTattoos();
-      setItems(savedTattoos);
+      const data = await getSavedTattoosApiUseCase();
+      setItems(data.savedTattoos);
     } catch (error) {
       console.error(error);
       void notifyError(
-        "Your saved tattoo shots could not be opened right now.",
-        "Could not load previews",
-      );
-      Alert.alert(
-        "Could not load previews",
-        "Your saved tattoo shots could not be opened right now.",
+        "Your saved tattoos could not be loaded right now.",
+        "Could not load saved tattoos",
       );
     } finally {
       setLoading(false);
@@ -51,66 +43,33 @@ export default function MyTattooScreen() {
     }, [loadItems]),
   );
 
-  const openPreview = (item: SavedTattoo) => {
+  const openPreview = (item: SavedTattooEntry) => {
+    const previewImageUri = item.capturedShotUrl || item.tattoo.imageUrl;
     router.push({
       pathname: "/saved-preview",
       params: {
         id: item.id,
-        imageUri: item.uri,
-        title: item.name,
+        imageUri: previewImageUri,
+        title: item.tattoo.name,
       },
     });
   };
 
-  const confirmRemove = (item: SavedTattoo) => {
-    Alert.alert(
-      "Remove shot?",
-      `Remove ${item.name} from My Tattoos?`,
-      [
-        {
-          text: "Cancel",
-          style: "cancel",
-        },
-        {
-          text: "Remove",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              await removeSavedTattoo(item.id);
-              setItems((current) => current.filter((entry) => entry.id !== item.id));
-              await notifySuccess("Preview removed from My Tattoos.", "Removed");
-            } catch (error) {
-              console.error(error);
-              await notifyError(
-                "This saved preview could not be removed right now.",
-                "Remove failed",
-              );
-              Alert.alert(
-                "Remove failed",
-                "This saved preview could not be removed right now.",
-              );
-            }
-          },
-        },
-      ],
-    );
-  };
-
   return (
-    <SafeAreaView style={styles.screen}>
+    <SafeAreaView style={styles.screen} edges={["top", "left", "right"]}>
       <View style={styles.hero}>
         <Text style={styles.kicker}>My Tattoos</Text>
-        <Text style={styles.title}>Your saved tattoo preview shots.</Text>
+        <Text style={styles.title}>Your saved tattoo captures.</Text>
         <Text style={styles.subtitle}>
-          Capture a photo in camera preview, save it, and keep your finished try-on
-          images here.
+          Saved tattoos now sync from your account and include captured shots
+          when available.
         </Text>
       </View>
 
       {loading ? (
         <View style={styles.loadingWrap}>
           <ActivityIndicator color="#6E4D2F" />
-          <Text style={styles.loadingText}>Loading your saved shots...</Text>
+          <Text style={styles.loadingText}>Loading your saved tattoos...</Text>
         </View>
       ) : items.length ? (
         <FlatList
@@ -125,35 +84,36 @@ export default function MyTattooScreen() {
                 styles.card,
                 pressed ? styles.cardPressed : null,
               ]}
-              onPress={() => openPreview(item)}>
+              onPress={() => openPreview(item)}
+            >
               <View style={styles.imageWrap}>
                 <Image
-                  source={{ uri: item.uri }}
+                  source={{
+                    uri: item.capturedShotUrl || item.tattoo.imageUrl,
+                  }}
                   style={styles.image}
                   cachePolicy="memory-disk"
                   contentFit="cover"
                   transition={100}
                 />
-                <Pressable
-                  hitSlop={10}
-                  style={styles.removeButton}
-                  onPress={() => confirmRemove(item)}>
-                  <Text style={styles.removeButtonText}>Remove</Text>
-                </Pressable>
               </View>
-              <Text style={styles.cardTitle}>{item.name}</Text>
+              <Text style={styles.cardTitle}>{item.tattoo.name}</Text>
               <Text style={styles.cardMeta}>
-                Saved {new Date(item.savedAt).toLocaleDateString()}
+                Saved{" "}
+                {new Date(
+                  typeof item.savedAt === "string"
+                    ? item.savedAt
+                    : item.savedAt._seconds * 1000,
+                ).toLocaleDateString()}
               </Text>
             </Pressable>
           )}
         />
       ) : (
         <View style={styles.emptyState}>
-          <Text style={styles.emptyTitle}>No saved shots yet</Text>
+          <Text style={styles.emptyTitle}>No saved tattoos yet</Text>
           <Text style={styles.emptyText}>
-            Capture a tattoo try-on photo in the camera screen, then tap save to add
-            it here.
+            Save a tattoo from camera preview to see it here.
           </Text>
         </View>
       )}
@@ -165,11 +125,13 @@ const styles = StyleSheet.create({
   screen: {
     flex: 1,
     backgroundColor: "#F7F1E8",
+    fontFamily: Fonts.fredoka,
   },
   hero: {
     paddingHorizontal: 16,
     paddingTop: 16,
     gap: 6,
+    fontFamily: Fonts.fredoka,
   },
   kicker: {
     color: "#7D5731",
@@ -177,18 +139,21 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     letterSpacing: 0.8,
     textTransform: "uppercase",
+    fontFamily: Fonts.fredoka,
   },
   title: {
     color: "#22160D",
     fontSize: 28,
     lineHeight: 32,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   subtitle: {
     color: "#5E5348",
     fontSize: 14,
     lineHeight: 21,
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
   },
   loadingWrap: {
     flex: 1,
@@ -196,21 +161,25 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: 12,
     paddingHorizontal: 24,
+    fontFamily: Fonts.fredoka,
   },
   loadingText: {
     color: "#5E5348",
     fontSize: 14,
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
   },
   listContent: {
     paddingHorizontal: 16,
     paddingTop: 18,
     paddingBottom: 24,
     gap: 16,
+    fontFamily: Fonts.fredoka,
   },
   row: {
     justifyContent: "space-between",
     gap: 16,
+    fontFamily: Fonts.fredoka,
   },
   card: {
     flex: 1,
@@ -220,9 +189,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#E8DCCE",
     gap: 8,
+    fontFamily: Fonts.fredoka,
   },
   cardPressed: {
     opacity: 0.82,
+    fontFamily: Fonts.fredoka,
   },
   imageWrap: {
     width: "100%",
@@ -234,34 +205,24 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     justifyContent: "center",
     alignItems: "center",
+    fontFamily: Fonts.fredoka,
   },
   image: {
     width: "100%",
     height: "100%",
-  },
-  removeButton: {
-    position: "absolute",
-    top: 10,
-    right: 10,
-    backgroundColor: "rgba(20, 14, 10, 0.72)",
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-  },
-  removeButtonText: {
-    color: "#FFF4E5",
-    fontSize: 11,
-    fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   cardTitle: {
     color: "#24180F",
     fontSize: 14,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   cardMeta: {
     color: "#7A6B5E",
     fontSize: 12,
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
   },
   emptyState: {
     flex: 1,
@@ -269,12 +230,14 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: 28,
     gap: 10,
+    fontFamily: Fonts.fredoka,
   },
   emptyTitle: {
     color: "#24180F",
     fontSize: 22,
     fontWeight: "700",
     textAlign: "center",
+    fontFamily: Fonts.fredoka,
   },
   emptyText: {
     color: "#5E5348",
@@ -282,7 +245,6 @@ const styles = StyleSheet.create({
     lineHeight: 21,
     textAlign: "center",
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
   },
 });
-
-

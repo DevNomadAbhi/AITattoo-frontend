@@ -1,5 +1,6 @@
 import { PropsWithChildren, useState } from 'react';
 import { StyleSheet, TouchableOpacity } from 'react-native';
+import { Fonts } from "@/constants/theme"
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
@@ -37,9 +38,11 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    fontFamily: Fonts.fredoka,
   },
   content: {
     marginTop: 6,
     marginLeft: 24,
+    fontFamily: Fonts.fredoka,
   },
 });

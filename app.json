@@ -1,25 +1,36 @@
 {
   "expo": {
-    "name": "TattooApp",
-    "slug": "TattooApp",
+    "name": "Tattoo Hunter",
+    "slug": "tattoo-hunter",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
-    "scheme": "tattooapp",
+    "icon": "./assets/images/appstore.png",
+    "scheme": "tattoo-hunter",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
+      "icon": "./assets/images/appstore.png",
       "supportsTablet": true
     },
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "foregroundImage": "./assets/images/appstore.png",
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
+        "android.permission.READ_MEDIA_IMAGES"
+      ],
+      "package": "com.abhiconexus.TattooHunter",
+      "googleServicesFile": "./google-services.json"
     },
     "web": {
       "output": "static",
@@ -30,13 +41,13 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "Allow TattooApp to access your camera so you can preview tattoo placement live."
+          "cameraPermission": "Allow Tattoo Hunter to access your camera so you can preview tattoo placement live."
         }
       ],
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/tattoo_hunter_crop.png",
+          "image": "./assets/images/appstore.png",
           "imageWidth": 280,
           "resizeMode": "contain",
           "backgroundColor": "#0d0907",
@@ -54,15 +65,24 @@
       [
         "expo-media-library",
         {
-          "photosPermission": "Allow TattooApp to access your photo library when saving tattoo previews.",
-          "savePhotosPermission": "Allow TattooApp to save captured tattoo previews to your photo library.",
+          "photosPermission": "Allow Tattoo Hunter to access your photo library when saving tattoo previews.",
+          "savePhotosPermission": "Allow Tattoo Hunter to save captured tattoo previews to your photo library.",
           "granularPermissions": ["photo"]
         }
-      ]
+      ],
+      "@react-native-google-signin/google-signin",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "12f57e5a-de00-4438-adc5-8644e0baa4a5"
+      }
+    },
+    "owner": "abhiconexus"
   }
 }

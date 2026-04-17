@@ -1,13 +1,21 @@
+import { Fonts } from "@/constants/theme";
 import FontAwesome6 from "@expo/vector-icons/FontAwesome6";
 import Ionicons from "@expo/vector-icons/Ionicons";
-import { CameraView, useCameraPermissions } from "expo-camera";
+import MaterialIcons from "@expo/vector-icons/MaterialIcons";
+import {
+  CameraPictureOptions,
+  CameraType,
+  CameraView,
+  useCameraPermissions,
+} from "expo-camera";
 import Constants from "expo-constants";
+import * as FileSystem from "expo-file-system/legacy";
 import { Image } from "expo-image";
 import * as MediaLibrary from "expo-media-library";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import * as Sharing from "expo-sharing";
 import { StatusBar } from "expo-status-bar";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Platform,
@@ -27,6 +35,8 @@ import { captureRef } from "react-native-view-shot";
 
 import { notifyError, notifyInfo, notifySuccess } from "@/lib/feedback";
 import { getSelectedTattoo, saveTattooToLibrary } from "@/lib/selected-tattoo";
+import { subscriptionService } from "@/lib/subscription";
+import { bookmarkTattooUseCase } from "@/lib/tattoo-api";
 
 const MIN_SCALE = 0.35;
 const MAX_SCALE = 4;
@@ -34,6 +44,7 @@ const BASE_TATTOO_SIZE = 190;
 const MIN_OPACITY = 0.2;
 const MAX_OPACITY = 0.95;
 const DEFAULT_OPACITY = 0.58;
+const ICON_ANIMATION_DURATION_MS = 260;
 
 function clamp(value: number, min: number, max: number) {
   "worklet";
@@ -46,17 +57,26 @@ export default function CameraPreviewScreen() {
   const params = useLocalSearchParams<{
     tattooUri?: string | string[];
     tattooName?: string | string[];
+    tattooId?: string | string[];
   }>();
   const [permission, requestPermission] = useCameraPermissions();
   const [facing, setFacing] = useState<"back" | "front">("back");
   const [capturedPhotoUri, setCapturedPhotoUri] = useState<string | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
-  const [exportAction, setExportAction] = useState<"library" | "download" | "share" | null>(
-    null,
-  );
+  const [exportAction, setExportAction] = useState<
+    "library" | "download" | "share" | null
+  >(null);
   const [showGuides, setShowGuides] = useState(true);
   const [isSaved, setIsSaved] = useState(false);
+  const [isBookmarked, setIsBookmarked] = useState(false);
+  const [showInstructions, setShowInstructions] = useState(true);
+  const [showIcons, setShowIcons] = useState(true);
   const cameraRef = useRef<CameraView | null>(null);
+  const [cameraType, setCameraType] = useState<CameraType>("back");
+  const [cameraResolution, setCameraResolution] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
   const previewStageRef = useRef<View | null>(null);
   const isExpoGoAndroid =
     Platform.OS === "android" &&
@@ -68,6 +88,9 @@ export default function CameraPreviewScreen() {
   const tattooName = Array.isArray(params.tattooName)
     ? params.tattooName[0]
     : (params.tattooName ?? selectedTattoo.name ?? "Saved Tattoo");
+  const tattooId = Array.isArray(params.tattooId)
+    ? params.tattooId[0]
+    : (params.tattooId ?? null);
   const translateX = useSharedValue(0);
   const translateY = useSharedValue(0);
   const startX = useSharedValue(0);
@@ -77,6 +100,52 @@ export default function CameraPreviewScreen() {
   const rotation = useSharedValue(0);
   const startRotation = useSharedValue(0);
   const opacity = useSharedValue(DEFAULT_OPACITY);
+  const iconVisibility = useSharedValue(showIcons ? 1 : 0);
+
+  // On mount, try to set the highest supported camera resolution
+  useEffect(() => {
+    (async () => {
+      try {
+        // Only run on real device
+        if (
+          cameraRef.current &&
+          cameraRef.current.getAvailablePictureSizesAsync
+        ) {
+          const sizes =
+            await cameraRef.current.getAvailablePictureSizesAsync("4:3");
+          // Try to find 4K or highest
+          let best = sizes.find(
+            (s) => s.includes("3840") || s.includes("2160") || s.includes("4k"),
+          );
+          if (!best && sizes.length) best = sizes[sizes.length - 1];
+          if (best) {
+            const [w, h] = best.split("x").map(Number);
+            setCameraResolution({ width: w, height: h });
+          }
+        }
+      } catch (e) {
+        // Ignore errors, fallback to default
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    setShowInstructions(true);
+    const timer = setTimeout(() => {
+      setShowInstructions(false);
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [capturedPhotoUri]);
+
+  useEffect(() => {
+    iconVisibility.value = withTiming(showIcons ? 1 : 0, {
+      duration: ICON_ANIMATION_DURATION_MS,
+    });
+  }, [iconVisibility, showIcons]);
+
+  useEffect(() => {
+    setIsBookmarked(false);
+  }, [tattooId]);
 
   const panGesture = Gesture.Pan()
     .onStart(() => {
@@ -122,6 +191,13 @@ export default function CameraPreviewScreen() {
     };
   });
 
+  const iconSlideStyle = useAnimatedStyle(() => {
+    return {
+      opacity: iconVisibility.value,
+      transform: [{ translateY: -24 * (1 - iconVisibility.value) }],
+    };
+  });
+
   const adjustScale = (delta: number) => {
     scale.value = withTiming(clamp(scale.value + delta, MIN_SCALE, MAX_SCALE));
   };
@@ -151,7 +227,25 @@ export default function CameraPreviewScreen() {
 
     try {
       setExportAction("library");
+
       const exportUri = await captureCompositePreview();
+      const base64 = await FileSystem.readAsStringAsync(exportUri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      const capturedShotDataUrl = `data:image/jpeg;base64,${base64}`;
+
+      // Keep API bookmarks in sync with the camera save action so My Tattoos
+      // always shows the saved tattoo.
+      if (tattooId) {
+        const bookmarkResult = await bookmarkTattooUseCase({
+          tattooId,
+          capturedShot: capturedShotDataUrl,
+        });
+        setIsBookmarked(true);
+        if (bookmarkResult.duplicate) {
+          await notifyInfo("Already in your saved tattoos.");
+        }
+      }
 
       await saveTattooToLibrary({
         name: `${tattooName} Preview`,
@@ -186,14 +280,25 @@ export default function CameraPreviewScreen() {
 
     try {
       setIsCapturing(true);
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.85,
-      });
+
+      // Check subscription for HD quality
+      const hasProAccess = await subscriptionService.hasProAccess();
+      const photoQuality = hasProAccess ? 1.0 : 0.7; // Use max quality for pro
+
+      // Build options for takePictureAsync
+      let options: CameraPictureOptions = { quality: photoQuality };
+      if (cameraResolution && hasProAccess) {
+        options = { ...options, ...cameraResolution };
+      }
+
+      const photo = await cameraRef.current.takePictureAsync(options);
 
       if (photo?.uri) {
         setCapturedPhotoUri(photo.uri);
         setIsSaved(false);
-        await notifyInfo("Preview captured.");
+        await notifyInfo(
+          hasProAccess ? "4K/HD preview captured." : "Preview captured.",
+        );
       }
     } catch (error) {
       console.error("Failed to capture preview image", error);
@@ -215,9 +320,13 @@ export default function CameraPreviewScreen() {
       throw new Error("Capture a photo before exporting the tattoo preview.");
     }
 
+    // Check subscription for HD export quality
+    const hasProAccess = await subscriptionService.hasProAccess();
+    const exportQuality = hasProAccess ? 0.95 : 0.75; // HD for pro, standard for free
+
     return captureRef(previewStageRef, {
       format: "jpg",
-      quality: 0.82,
+      quality: exportQuality,
       result: "tmpfile",
       fileName: `tattoo-preview-${Date.now()}`,
     });
@@ -225,6 +334,25 @@ export default function CameraPreviewScreen() {
 
   const saveCapturedPreview = async () => {
     if (!capturedPhotoUri || exportAction) {
+      return;
+    }
+
+    // Check subscription for download access
+    const hasProAccess = await subscriptionService.hasProAccess();
+    if (!hasProAccess) {
+      Alert.alert(
+        "PRO Feature Required",
+        "Downloading high-quality tattoo previews is a PRO feature. Upgrade to unlock HD downloads and sharing.",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Upgrade to PRO",
+            onPress: () => {
+              router.push("/(tabs)/profile");
+            },
+          },
+        ],
+      );
       return;
     }
 
@@ -262,7 +390,10 @@ export default function CameraPreviewScreen() {
       const exportUri = await captureCompositePreview();
       await MediaLibrary.saveToLibraryAsync(exportUri);
 
-      await notifySuccess("Preview downloaded to your photo library.", "Saved");
+      await notifySuccess(
+        "HD preview downloaded to your photo library.",
+        "Saved",
+      );
     } catch (error) {
       console.error("Failed to save captured preview", error);
       await notifyError(
@@ -287,9 +418,27 @@ export default function CameraPreviewScreen() {
       return;
     }
 
+    // Check subscription for share access
+    const hasProAccess = await subscriptionService.hasProAccess();
+    if (!hasProAccess) {
+      Alert.alert(
+        "PRO Feature Required",
+        "Sharing high-quality tattoo previews is a PRO feature. Upgrade to unlock HD downloads and sharing.",
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Upgrade to PRO",
+            onPress: () => {
+              router.push("/(tabs)/profile");
+            },
+          },
+        ],
+      );
+      return;
+    }
+
     try {
       setExportAction("share");
-
       const shareAvailable = await Sharing.isAvailableAsync();
       if (!shareAvailable) {
         throw new Error("Sharing is not available on this device.");
@@ -393,6 +542,12 @@ export default function CameraPreviewScreen() {
                   "The camera preview could not be started on this device.",
               );
             }}
+            {...(cameraResolution && {
+              photo: {
+                width: cameraResolution.width,
+                height: cameraResolution.height,
+              },
+            })}
           />
         )}
 
@@ -426,30 +581,66 @@ export default function CameraPreviewScreen() {
 
           <View style={styles.headerSpacer} />
 
-          <Pressable
-            style={[
-              styles.iconOnlyButton,
-              styles.flipIconButton,
-              capturedPhotoUri ? styles.disabledButton : null,
-            ]}
-            onPress={() =>
-              setFacing((current) => (current === "back" ? "front" : "back"))
-            }
-            disabled={Boolean(capturedPhotoUri)}
+          <Animated.View
+            style={[styles.topToolsRow, iconSlideStyle]}
+            pointerEvents={showIcons ? "auto" : "none"}
           >
-            <Ionicons name="camera-reverse-outline" size={20} color="#FFF6EA" />
+            <Pressable
+              style={[
+                styles.iconOnlyButton,
+                showGuides ? styles.sideIconButtonActive : null,
+              ]}
+              onPress={() => setShowGuides((current) => !current)}
+            >
+              <Ionicons name="grid-outline" size={18} color="#FFF4E5" />
+            </Pressable>
+
+            <Pressable style={styles.iconOnlyButton} onPress={resetOverlay}>
+              <Ionicons name="refresh-outline" size={20} color="#FFF4E5" />
+            </Pressable>
+
+            <Pressable
+              style={[
+                styles.iconOnlyButton,
+                styles.flipIconButton,
+                capturedPhotoUri ? styles.disabledButton : null,
+              ]}
+              onPress={() =>
+                setFacing((current) => (current === "back" ? "front" : "back"))
+              }
+              disabled={Boolean(capturedPhotoUri)}
+            >
+              <Ionicons
+                name="camera-reverse-outline"
+                size={20}
+                color="#FFF6EA"
+              />
+            </Pressable>
+          </Animated.View>
+
+          <Pressable
+            style={styles.iconOnlyButton}
+            onPress={() => setShowIcons((current) => !current)}
+          >
+            <Ionicons
+              name={showIcons ? "eye-outline" : "eye-off-outline"}
+              size={20}
+              color="#FFF6EA"
+            />
           </Pressable>
         </View>
 
-        <View style={styles.instructionsBanner} pointerEvents="none">
-          <Text style={styles.instructions}>
-            {capturedPhotoUri
-              ? "Shot frozen. Fine-tune placement, then download or share."
-              : "Drag, pinch, and twist the tattoo. Use the side controls to refine placement."}
-          </Text>
-        </View>
+        {showInstructions && showIcons && (
+          <View style={styles.instructionsBanner} pointerEvents="none">
+            <Text style={styles.instructions}>
+              {capturedPhotoUri
+                ? "Shot frozen. Fine-tune placement, then download or share."
+                : "Drag, pinch, and twist the tattoo. Use the side controls to refine placement."}
+            </Text>
+          </View>
+        )}
 
-        {showGuides ? (
+        {showGuides && showIcons ? (
           <View style={styles.guideLayer} pointerEvents="none">
             <View style={styles.guideVertical} />
             <View style={styles.guideHorizontal} />
@@ -457,9 +648,12 @@ export default function CameraPreviewScreen() {
           </View>
         ) : null}
 
-        <View style={styles.sideControls} pointerEvents="box-none">
+        <Animated.View
+          style={[styles.sideControls, iconSlideStyle]}
+          pointerEvents={showIcons ? "box-none" : "none"}
+        >
           <View
-            style={[styles.sideRail, styles.leftRail, styles.topAlignedRail]}
+            style={[styles.sideRail, styles.rightRail, styles.topAlignedRail]}
             pointerEvents="box-none"
           >
             <Pressable
@@ -486,44 +680,25 @@ export default function CameraPreviewScreen() {
               style={styles.sideIconButton}
               onPress={() => adjustOpacity(-0.08)}
             >
-              <Ionicons name="eye-off-outline" size={19} color="#FFF4E5" />
-            </Pressable>
-          </View>
-
-          <View
-            style={[styles.sideRail, styles.rightRail, styles.topAlignedRail]}
-            pointerEvents="box-none"
-          >
-            <Pressable
-              style={styles.sideIconButton}
-              onPress={() => adjustRotation(-Math.PI / 12)}
-            >
-              <Ionicons name="arrow-undo" size={18} color="#FFF4E5" />
-            </Pressable>
-            <Pressable
-              style={styles.sideIconButton}
-              onPress={() => adjustRotation(Math.PI / 12)}
-            >
-              <Ionicons name="arrow-redo" size={18} color="#FFF4E5" />
+              <MaterialIcons name="brightness-4" size={20} color="#FFF4E5" />
             </Pressable>
             <Pressable
               style={styles.sideIconButton}
               onPress={() => adjustOpacity(0.08)}
             >
-              <Ionicons name="eye-outline" size={20} color="#FFF4E5" />
+              <MaterialIcons name="brightness-5" size={20} color="#FFF4E5" />
             </Pressable>
             <Pressable
-              style={[
-                styles.sideIconButton,
-                showGuides ? styles.sideIconButtonActive : null,
-              ]}
-              onPress={() => setShowGuides((current) => !current)}
+              style={styles.sideIconButton}
+              onPress={() => adjustRotation(-Math.PI / 12)}
             >
-              <Ionicons name="grid-outline" size={18} color="#FFF4E5" />
+              <FontAwesome6 name="rotate-left" size={17} color="#FFF4E5" />
             </Pressable>
-
-            <Pressable style={styles.sideIconButton} onPress={resetOverlay}>
-              <Ionicons name="refresh" size={20} color="#FFF4E5" />
+            <Pressable
+              style={styles.sideIconButton}
+              onPress={() => adjustRotation(Math.PI / 12)}
+            >
+              <FontAwesome6 name="rotate-right" size={17} color="#FFF4E5" />
             </Pressable>
 
             {capturedPhotoUri ? (
@@ -536,16 +711,14 @@ export default function CameraPreviewScreen() {
                   }}
                   disabled={Boolean(exportAction)}
                 >
-                  <Ionicons
-                    name="camera-reverse-outline"
-                    size={20}
-                    color="#FFF4E5"
-                  />
+                  <Ionicons name="camera-outline" size={20} color="#FFF4E5" />
                 </Pressable>
                 <Pressable
                   style={[
                     styles.sideIconButton,
-                    isSaved ? styles.sideIconButtonActive : styles.secondaryActionButton,
+                    isSaved
+                      ? styles.sideIconButtonActive
+                      : styles.secondaryActionButton,
                     exportAction ? styles.disabledCapture : null,
                   ]}
                   onPress={handleSaveToLibrary}
@@ -594,7 +767,7 @@ export default function CameraPreviewScreen() {
               </>
             ) : null}
           </View>
-        </View>
+        </Animated.View>
 
         {!capturedPhotoUri ? (
           <View style={styles.bottomCaptureWrap} pointerEvents="box-none">
@@ -623,15 +796,19 @@ const styles = StyleSheet.create({
   screen: {
     flex: 1,
     backgroundColor: "#050505",
+    fontFamily: Fonts.fredoka,
   },
   overlayLayer: {
     flex: 1,
+    fontFamily: Fonts.fredoka,
   },
   previewStage: {
     ...StyleSheet.absoluteFillObject,
+    fontFamily: Fonts.fredoka,
   },
   previewOverlay: {
     flex: 1,
+    fontFamily: Fonts.fredoka,
   },
   headerWrap: {
     paddingHorizontal: 12,
@@ -640,9 +817,18 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "space-between",
     gap: 10,
+    fontFamily: Fonts.fredoka,
   },
   headerSpacer: {
     flex: 1,
+    fontFamily: Fonts.fredoka,
+  },
+  topToolsRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginRight: 8,
+    fontFamily: Fonts.fredoka,
   },
   iconOnlyButton: {
     width: 48,
@@ -653,50 +839,62 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255, 255, 255, 0.12)",
     alignItems: "center",
     justifyContent: "center",
+    fontFamily: Fonts.fredoka,
   },
   flipIconButton: {
     paddingLeft: 1,
+    fontFamily: Fonts.fredoka,
   },
   disabledButton: {
     opacity: 0.45,
+    fontFamily: Fonts.fredoka,
   },
   sideControls: {
     ...StyleSheet.absoluteFillObject,
+    fontFamily: Fonts.fredoka,
   },
   sideRail: {
     width: 56,
     gap: 8,
     alignItems: "center",
     position: "absolute",
+    fontFamily: Fonts.fredoka,
   },
   leftRail: {
     left: 8,
+    fontFamily: Fonts.fredoka,
   },
   rightRail: {
     right: 8,
+    fontFamily: Fonts.fredoka,
   },
   topAlignedRail: {
     top: 118,
     justifyContent: "flex-start",
+    fontFamily: Fonts.fredoka,
   },
   canvas: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
+    fontFamily: Fonts.fredoka,
   },
   tattooWrap: {
     width: BASE_TATTOO_SIZE,
     height: BASE_TATTOO_SIZE,
     alignItems: "center",
     justifyContent: "center",
+    fontFamily: Fonts.fredoka,
   },
   blendLayer: {
     isolation: "isolate",
     mixBlendMode: "multiply",
+    fontFamily: Fonts.fredoka,
   },
   tattooImage: {
     width: "100%",
     height: "100%",
+    fontFamily: Fonts.fredoka,
   },
   instructionsBanner: {
     marginTop: 12,
@@ -707,6 +905,7 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(11, 10, 9, 0.6)",
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.08)",
+    fontFamily: Fonts.fredoka,
   },
   instructions: {
     color: "#F7E9D4",
@@ -714,11 +913,13 @@ const styles = StyleSheet.create({
     fontSize: 13,
     lineHeight: 18,
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
   },
   guideLayer: {
     ...StyleSheet.absoluteFillObject,
     alignItems: "center",
     justifyContent: "center",
+    fontFamily: Fonts.fredoka,
   },
   guideVertical: {
     position: "absolute",
@@ -726,6 +927,7 @@ const styles = StyleSheet.create({
     top: "23%",
     bottom: "18%",
     backgroundColor: "rgba(255, 244, 229, 0.2)",
+    fontFamily: Fonts.fredoka,
   },
   guideHorizontal: {
     position: "absolute",
@@ -734,6 +936,7 @@ const styles = StyleSheet.create({
     top: "45%",
     height: 1,
     backgroundColor: "rgba(255, 244, 229, 0.16)",
+    fontFamily: Fonts.fredoka,
   },
   guideTorso: {
     position: "absolute",
@@ -742,6 +945,7 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     borderWidth: 1,
     borderColor: "rgba(255, 244, 229, 0.14)",
+    fontFamily: Fonts.fredoka,
   },
   sideIconButton: {
     width: 46,
@@ -752,10 +956,12 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255, 255, 255, 0.12)",
     alignItems: "center",
     justifyContent: "center",
+    fontFamily: Fonts.fredoka,
   },
   sideIconButtonActive: {
     backgroundColor: "rgba(233, 209, 167, 0.18)",
     borderColor: "rgba(233, 209, 167, 0.36)",
+    fontFamily: Fonts.fredoka,
   },
   captureIconButton: {
     width: 68,
@@ -766,6 +972,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#FFF4E1",
     borderWidth: 4,
     borderColor: "rgba(20, 16, 12, 0.14)",
+    fontFamily: Fonts.fredoka,
   },
   bottomCaptureWrap: {
     position: "absolute",
@@ -773,22 +980,27 @@ const styles = StyleSheet.create({
     right: 0,
     bottom: 86,
     alignItems: "center",
+    fontFamily: Fonts.fredoka,
   },
   primaryActionButton: {
     backgroundColor: "#FFF4E1",
+    fontFamily: Fonts.fredoka,
   },
   secondaryActionButton: {
     backgroundColor: "rgba(255, 255, 255, 0.08)",
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.12)",
+    fontFamily: Fonts.fredoka,
   },
   darkActionButton: {
     backgroundColor: "#17110D",
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.12)",
+    fontFamily: Fonts.fredoka,
   },
   disabledCapture: {
     opacity: 0.65,
+    fontFamily: Fonts.fredoka,
   },
   resetButton: {
     alignItems: "center",
@@ -798,11 +1010,13 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(255, 255, 255, 0.08)",
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.12)",
+    fontFamily: Fonts.fredoka,
   },
   resetButtonText: {
     color: "#FFF4E5",
     fontSize: 14,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   fallbackScreen: {
     flex: 1,
@@ -811,12 +1025,14 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     paddingHorizontal: 28,
     gap: 14,
+    fontFamily: Fonts.fredoka,
   },
   fallbackTitle: {
     color: "#FFF4E5",
     fontSize: 24,
     fontWeight: "700",
     textAlign: "center",
+    fontFamily: Fonts.fredoka,
   },
   fallbackText: {
     color: "rgba(255, 244, 229, 0.84)",
@@ -824,6 +1040,7 @@ const styles = StyleSheet.create({
     lineHeight: 24,
     textAlign: "center",
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
   },
   primaryButton: {
     marginTop: 8,
@@ -834,17 +1051,12 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: "#E9D1A7",
     paddingHorizontal: 20,
+    fontFamily: Fonts.fredoka,
   },
   primaryButtonText: {
     color: "#21160E",
     fontSize: 15,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
 });
-
-
-
-
-
-
-

@@ -45,7 +45,7 @@ export default function WelcomeScreen() {
           </View>
 
           <Pressable
-            onPress={() => router.replace("/(tabs)")}
+            onPress={() => router.push("/(auth)/login")}
             style={({ pressed }) => [
               styles.button,
               { opacity: pressed ? 0.92 : 1 },
@@ -67,10 +67,12 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: "#0D0907",
+    fontFamily: Fonts.fredoka,
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: "rgba(10, 7, 5, 0.48)",
+    fontFamily: Fonts.fredoka,
   },
   container: {
     flex: 1,
@@ -78,10 +80,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     paddingTop: 20,
     paddingBottom: 24,
+    fontFamily: Fonts.fredoka,
   },
   header: {
     gap: 16,
     marginTop: 8,
+    fontFamily: Fonts.fredoka,
   },
   kickerBadge: {
     alignSelf: "flex-start",
@@ -91,12 +95,13 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(212, 180, 120, 0.18)",
     borderWidth: 1,
     borderColor: "rgba(241, 218, 175, 0.28)",
+    fontFamily: Fonts.fredoka,
   },
   kickerText: {
     color: "#F6E7C8",
     fontSize: 12,
     fontWeight: "500",
-    fontFamily: Fonts.mono,
+    fontFamily: Fonts.fredoka,
     letterSpacing: 1.2,
     textTransform: "uppercase",
   },
@@ -106,7 +111,7 @@ const styles = StyleSheet.create({
     fontSize: 40,
     lineHeight: 44,
     fontWeight: "700",
-    fontFamily: Fonts.rounded,
+    fontFamily: Fonts.fredoka,
   },
   subtitle: {
     maxWidth: 310,
@@ -114,16 +119,18 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 24,
     fontWeight: "500",
-    fontFamily: Fonts.sans,
+    fontFamily: Fonts.fredoka,
   },
   footer: {
     gap: 16,
+    fontFamily: Fonts.fredoka,
   },
   featureRow: {
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 10,
     justifyContent: "space-between",
+    fontFamily: Fonts.fredoka,
   },
   featurePill: {
     paddingHorizontal: 14,
@@ -132,12 +139,13 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(15, 11, 9, 0.55)",
     borderWidth: 1,
     borderColor: "rgba(243, 218, 176, 0.18)",
+    fontFamily: Fonts.fredoka,
   },
   featureText: {
     color: "#F8EBD4",
     fontSize: 14,
     fontWeight: "600",
-    fontFamily: Fonts.sans,
+    fontFamily: Fonts.fredoka,
   },
   button: {
     minHeight: 58,
@@ -145,12 +153,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#E8D1A8",
+    fontFamily: Fonts.fredoka,
   },
   buttonText: {
     color: "#1B130D",
     fontSize: 16,
     fontWeight: "700",
-    fontFamily: Fonts.sans,
+    fontFamily: Fonts.fredoka,
   },
   helperText: {
     color: "rgba(255, 241, 221, 0.7)",
@@ -158,6 +167,6 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     textAlign: "center",
     fontWeight: "500",
-    fontFamily: Fonts.sans,
+    fontFamily: Fonts.fredoka,
   },
 });

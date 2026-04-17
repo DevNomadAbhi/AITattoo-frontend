@@ -1,33 +1,32 @@
+import { Fonts } from "@/constants/theme";
+import * as FileSystem from "expo-file-system/legacy";
+import { Image } from "expo-image";
 import * as ImagePicker from "expo-image-picker";
-import { useRouter } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator,
-  Alert,
-  FlatList,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
+    ActivityIndicator,
+    Alert,
+    FlatList,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Image } from "expo-image";
 
-import {
-  CreateHistoryItem,
-  getCreateHistory,
-  saveCreateHistoryEntry,
-} from "@/lib/create-history";
 import { notifyError, notifySuccess } from "@/lib/feedback";
 import { setSelectedTattoo } from "@/lib/selected-tattoo";
-
-const SERVER_URL = "http://192.168.2.156:3000";
-const IMAGE_TO_TATTOO_ENDPOINTS = [
-  "/generate-tattoo-from-image",
-  "/convert-image-to-tattoo",
-] as const;
+import {
+    generateTattooFromImageUseCase,
+    generateTattooFromPromptUseCase,
+    getCreditsUseCase,
+    getRecentCreationsUseCase,
+    saveAiTattooUseCase,
+    saveRecentCreationsUseCase,
+} from "@/lib/tattoo-api";
 
 const textPromptSuggestions = [
   "minimal black fine-line snake wrapping around a rose",
@@ -48,10 +47,37 @@ type GeneratedTattooOption = {
   uri: string;
 };
 
+type CreateHistoryResultImage = {
+  id: string;
+  uri: string;
+};
+
+type CreateHistoryItem = {
+  createdAt: string;
+  id: string;
+  mode: GenerationMode;
+  prompt: string;
+  referenceImageUri: string | null;
+  resultImages: CreateHistoryResultImage[];
+};
+
 type GenerationMode = "text" | "image";
+const MAX_IMAGES_PER_GENERATION = 4;
 
 function getStringValue(value: unknown) {
   return typeof value === "string" ? value : null;
+}
+
+function isImageUri(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized.startsWith("data:image/") ||
+    normalized.startsWith("http://") ||
+    normalized.startsWith("https://") ||
+    normalized.startsWith("file://") ||
+    normalized.startsWith("content://") ||
+    normalized.startsWith("blob:")
+  );
 }
 
 function toImageUri(value: unknown) {
@@ -61,18 +87,20 @@ function toImageUri(value: unknown) {
     return null;
   }
 
-  if (
-    imageValue.startsWith("data:image/") ||
-    imageValue.startsWith("http://") ||
-    imageValue.startsWith("https://") ||
-    imageValue.startsWith("file://") ||
-    imageValue.startsWith("content://") ||
-    imageValue.startsWith("blob:")
-  ) {
-    return imageValue;
+  const trimmed = imageValue.trim();
+  if (!trimmed) {
+    return null;
   }
 
-  return `data:image/png;base64,${imageValue}`;
+  if (isImageUri(trimmed)) {
+    return trimmed;
+  }
+
+  if (looksLikeBase64Image(trimmed)) {
+    return `data:image/png;base64,${trimmed}`;
+  }
+
+  return null;
 }
 
 function looksLikeBase64Image(value: string) {
@@ -93,7 +121,38 @@ function normalizeImageUri(uri: string) {
   return uri.trim();
 }
 
-function extractImageUris(value: unknown, seen = new Set<unknown>()) {
+function getMimeTypeFromUri(uri: string) {
+  const normalized = uri.toLowerCase();
+  if (normalized.endsWith(".jpg") || normalized.endsWith(".jpeg")) {
+    return "image/jpeg";
+  }
+  if (normalized.endsWith(".webp")) {
+    return "image/webp";
+  }
+  return "image/png";
+}
+
+async function toSavableGeneratedImage(imageUri: string): Promise<string> {
+  if (imageUri.startsWith("data:image/")) {
+    return imageUri;
+  }
+
+  if (imageUri.startsWith("http://") || imageUri.startsWith("https://")) {
+    return imageUri;
+  }
+
+  if (imageUri.startsWith("file://") || imageUri.startsWith("content://")) {
+    const base64 = await FileSystem.readAsStringAsync(imageUri, {
+      encoding: FileSystem.EncodingType.Base64,
+    });
+    const mimeType = getMimeTypeFromUri(imageUri);
+    return `data:${mimeType};base64,${base64}`;
+  }
+
+  return imageUri;
+}
+
+function extractImageUris(value: unknown, seen = new Set<unknown>()): string[] {
   if (value == null || seen.has(value)) {
     return [];
   }
@@ -104,7 +163,9 @@ function extractImageUris(value: unknown, seen = new Set<unknown>()) {
       return [directUri];
     }
 
-    return looksLikeBase64Image(value) ? [`data:image/png;base64,${value}`] : [];
+    return looksLikeBase64Image(value)
+      ? [`data:image/png;base64,${value}`]
+      : [];
   }
 
   if (Array.isArray(value)) {
@@ -133,31 +194,14 @@ function extractImageUris(value: unknown, seen = new Set<unknown>()) {
       .map((key) => toImageUri(record[key]))
       .filter((item): item is string => Boolean(item));
 
-    const nestedMatches = Object.values(record).flatMap((item) =>
-      extractImageUris(item, seen)
+    const nestedMatches: string[] = Object.values(record).flatMap((item) =>
+      extractImageUris(item, seen),
     );
 
     return [...directMatches, ...nestedMatches];
   }
 
   return [];
-}
-
-async function readJsonResponse(response: Response) {
-  const rawText = await response.text();
-
-  if (!rawText.trim()) {
-    return {} as Record<string, unknown>;
-  }
-
-  try {
-    return JSON.parse(rawText) as Record<string, unknown>;
-  } catch {
-    const preview = rawText.slice(0, 140).trim();
-    throw new Error(
-      `Server did not return JSON. This usually means the endpoint is missing or crashed. Response started with: ${preview}`
-    );
-  }
 }
 
 function collectGeneratedImages(data: Record<string, unknown>) {
@@ -177,12 +221,112 @@ function collectGeneratedImages(data: Record<string, unknown>) {
       uri,
     });
 
-    if (uniqueImages.length === 4) {
+    if (uniqueImages.length === MAX_IMAGES_PER_GENERATION) {
       break;
     }
   }
 
   return uniqueImages;
+}
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function getRowsFromRecentCreationsPayload(payload: unknown): unknown[] {
+  if (Array.isArray(payload)) return payload;
+
+  const record = toRecord(payload);
+  if (!record) return [];
+
+  const candidates = [
+    record.recentCreations,
+    record.items,
+    record.data,
+    record.created,
+    record.rows,
+  ];
+
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate)) {
+      return candidate;
+    }
+  }
+
+  return [];
+}
+
+function mapRecentCreationsToHistoryItems(
+  payload: unknown,
+): CreateHistoryItem[] {
+  const rows = getRowsFromRecentCreationsPayload(payload);
+  const grouped = new Map<string, CreateHistoryItem>();
+
+  rows.forEach((row, index) => {
+    const record = toRecord(row);
+    if (!record) return;
+
+    const prompt =
+      getStringValue(record.prompt) ??
+      getStringValue(record.name) ??
+      "Recent creation";
+    const modeCandidate = getStringValue(record.mode);
+    const mode: GenerationMode = modeCandidate === "image" ? "image" : "text";
+
+    const createdAt =
+      getStringValue(record.createdAt) ??
+      getStringValue(record.updatedAt) ??
+      new Date().toISOString();
+
+    const groupId =
+      getStringValue(record.requestGroupId) ??
+      getStringValue(record.groupId) ??
+      getStringValue(record.id) ??
+      `${prompt}-${createdAt}-${index}`;
+
+    const rowImages = extractImageUris(record.images ?? row).filter(isImageUri);
+
+    if (!grouped.has(groupId)) {
+      grouped.set(groupId, {
+        createdAt,
+        id: groupId,
+        mode,
+        prompt,
+        referenceImageUri: null,
+        resultImages: [],
+      });
+    }
+
+    const item = grouped.get(groupId)!;
+    for (const uri of rowImages) {
+      if (item.resultImages.length >= MAX_IMAGES_PER_GENERATION) {
+        break;
+      }
+
+      if (item.resultImages.some((result) => result.uri === uri)) {
+        continue;
+      }
+
+      item.resultImages.push({
+        id: `history-${item.resultImages.length}`,
+        uri,
+      });
+
+      if (item.resultImages.length >= MAX_IMAGES_PER_GENERATION) {
+        break;
+      }
+    }
+  });
+
+  return [...grouped.values()]
+    .filter(
+      (item) =>
+        item.resultImages.length > 0 &&
+        item.resultImages.some((image) => isImageUri(image.uri)),
+    )
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 export default function CreateTattooScreen() {
@@ -193,8 +337,17 @@ export default function CreateTattooScreen() {
   const [imagePrompt, setImagePrompt] = useState("");
   const [resultImages, setResultImages] = useState<GeneratedTattooOption[]>([]);
   const [historyItems, setHistoryItems] = useState<CreateHistoryItem[]>([]);
-  const [referenceImageUri, setReferenceImageUri] = useState<string | null>(null);
+  const [referenceImageUri, setReferenceImageUri] = useState<string | null>(
+    null,
+  );
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [selectedResultImage, setSelectedResultImage] =
+    useState<GeneratedTattooOption | null>(null);
+  const [savedTattooIdsByImage, setSavedTattooIdsByImage] = useState<
+    Record<string, string>
+  >({});
+  const [credits, setCredits] = useState<number | null>(null);
   const [previewPanelTop, setPreviewPanelTop] = useState<number | null>(null);
   const prompt = generationMode === "image" ? imagePrompt : textPrompt;
   const setPrompt = generationMode === "image" ? setImagePrompt : setTextPrompt;
@@ -202,11 +355,7 @@ export default function CreateTattooScreen() {
     generationMode === "image" ? imagePromptSuggestions : textPromptSuggestions;
 
   useEffect(() => {
-    if (
-      generationMode !== "image" ||
-      !resultImages.length ||
-      previewPanelTop == null
-    ) {
+    if (!resultImages.length || previewPanelTop == null) {
       return;
     }
 
@@ -215,15 +364,15 @@ export default function CreateTattooScreen() {
         y: Math.max(previewPanelTop - 16, 0),
         animated: true,
       });
-    }, 40);
+    }, 80);
 
     return () => clearTimeout(timeoutId);
-  }, [generationMode, previewPanelTop, resultImages]);
-
+  }, [previewPanelTop, resultImages]);
 
   const loadCreateHistory = useCallback(async () => {
     try {
-      const items = await getCreateHistory();
+      const raw = await getRecentCreationsUseCase();
+      const items = mapRecentCreationsToHistoryItems(raw);
       setHistoryItems(items);
     } catch (error) {
       console.error("Failed to load create history", error);
@@ -233,6 +382,24 @@ export default function CreateTattooScreen() {
   useEffect(() => {
     loadCreateHistory();
   }, [loadCreateHistory]);
+
+  // Always refresh credits when screen is focused
+  useFocusEffect(
+    useCallback(() => {
+      let isActive = true;
+      (async () => {
+        try {
+          const result = await getCreditsUseCase();
+          if (isActive) setCredits(result.creditsRemaining);
+        } catch (err) {
+          console.error("Failed to load credit count", err);
+        }
+      })();
+      return () => {
+        isActive = false;
+      };
+    }, []),
+  );
 
   const restoreHistoryItem = async (item: CreateHistoryItem) => {
     setGenerationMode(item.mode);
@@ -249,11 +416,12 @@ export default function CreateTattooScreen() {
 
   const pickReferenceImage = async () => {
     try {
-      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      const permission =
+        await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!permission.granted) {
         Alert.alert(
           "Photo access needed",
-          "Allow photo library access so you can upload a reference image."
+          "Allow photo library access so you can upload a reference image.",
         );
         return;
       }
@@ -274,186 +442,87 @@ export default function CreateTattooScreen() {
       console.error(error);
       Alert.alert(
         "Image upload failed",
-        "The reference image could not be selected. Please try again."
+        "The reference image could not be selected. Please try again.",
       );
     }
-  };
-
-  const buildImageToTattooFormData = (trimmedPrompt: string) => {
-    if (!referenceImageUri) {
-      throw new Error("Upload an image before generating a tattoo from it.");
-    }
-
-    const tattooOnlyPrompt = [
-      trimmedPrompt,
-      "convert this reference into a tattoo design",
-      "tattoo design only",
-      "isolated transparent background",
-      "no skin",
-      "no body",
-      "no mockup",
-      "black ink stencil",
-    ].join(", ");
-
-    const filename = referenceImageUri.split("/").pop() ?? "reference-image.jpg";
-    const fileExtension = filename.split(".").pop()?.toLowerCase();
-    const mimeType =
-      fileExtension === "png"
-        ? "image/png"
-        : fileExtension === "webp"
-          ? "image/webp"
-          : "image/jpeg";
-
-    const formData = new FormData();
-    formData.append("image", {
-      uri: referenceImageUri,
-      name: filename,
-      type: mimeType,
-    } as unknown as Blob);
-    formData.append("prompt", tattooOnlyPrompt);
-    formData.append("originalPrompt", trimmedPrompt);
-    formData.append("transparentBackground", "true");
-    formData.append("format", "png");
-    formData.append("removeBackground", "true");
-    formData.append("isolated", "true");
-    formData.append(
-      "negativePrompt",
-      "white background, solid background, skin, arm, person, mockup, poster, paper, wall, framed artwork, photo background"
-    );
-
-    return formData;
-  };
-
-  const generateTattooFromReference = async (trimmedPrompt: string) => {
-    let lastError: Error | null = null;
-
-    for (const endpoint of IMAGE_TO_TATTOO_ENDPOINTS) {
-      try {
-        const response = await fetch(`${SERVER_URL}${endpoint}`, {
-          method: "POST",
-          body: buildImageToTattooFormData(trimmedPrompt),
-        });
-
-        const data = await readJsonResponse(response);
-
-        if (response.status === 404) {
-          lastError = new Error(`Endpoint ${endpoint} was not found on the server.`);
-          continue;
-        }
-
-        if (!response.ok) {
-          throw new Error(
-            getStringValue(data.error) ??
-              `AI failed to convert the image. Server returned ${response.status}.`
-          );
-        }
-
-        return data;
-      } catch (error) {
-        lastError =
-          error instanceof Error
-            ? error
-            : new Error("Could not convert the uploaded image into a tattoo.");
-      }
-    }
-
-    throw (
-      lastError ??
-      new Error("Could not find a backend endpoint to convert the uploaded image.")
-    );
   };
 
   const generateTattoo = async () => {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) {
-      Alert.alert("Prompt required", "Describe the tattoo you want to generate.");
+      Alert.alert(
+        "Prompt required",
+        "Describe the tattoo you want to generate.",
+      );
       return;
     }
 
     if (generationMode === "image" && !referenceImageUri) {
       Alert.alert(
         "Reference image required",
-        "Upload an image before converting it into a tattoo."
+        "Upload an image before converting it into a tattoo.",
       );
       return;
     }
 
     setLoading(true);
     setResultImages([]);
+    setSelectedResultImage(null);
+    setSavedTattooIdsByImage({});
 
     try {
-      const tattooOnlyPrompt = [
-        trimmedPrompt,
-        "tattoo design only",
-        "isolated transparent background",
-        "no white background",
-        "no skin",
-        "no body",
-        "no mockup",
-        "no poster",
-        "no paper",
-        "png tattoo asset",
-        "black ink stencil",
-      ].join(", ");
+      const data =
+        generationMode === "image"
+          ? await generateTattooFromImageUseCase(
+              referenceImageUri!,
+              trimmedPrompt,
+            )
+          : await generateTattooFromPromptUseCase(trimmedPrompt);
 
-      const data = generationMode === "image"
-        ? await generateTattooFromReference(trimmedPrompt)
-        : await (async () => {
-            const response = await fetch(`${SERVER_URL}/generate-tattoo-from-prompt`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                prompt: tattooOnlyPrompt,
-                originalPrompt: trimmedPrompt,
-                transparentBackground: true,
-                format: "png",
-                removeBackground: true,
-                isolated: true,
-                negativePrompt:
-                  "white background, solid background, skin, arm, person, mockup, poster, paper, wall, framed artwork, photo background",
-              }),
-            });
-
-            const json = await readJsonResponse(response);
-
-            if (!response.ok) {
-              throw new Error(
-                getStringValue(json.error) ??
-                  `AI failed to generate the tattoo. Server returned ${response.status}.`
-              );
-            }
-
-            return json;
-          })();
+      if (typeof data.creditsRemaining === "number") {
+        setCredits(data.creditsRemaining);
+      }
 
       const generatedImages = collectGeneratedImages(data);
 
       if (!generatedImages.length) {
         throw new Error(
-          "The server responded, but no generated tattoo image was returned."
+          "The server responded, but no generated tattoo image was returned.",
         );
       }
 
-      let nextResultImages = generatedImages;
-
       try {
-        const savedHistory = await saveCreateHistoryEntry({
-          mode: generationMode,
-          prompt: trimmedPrompt,
-          referenceImageUri: generationMode === "image" ? referenceImageUri : null,
-          resultImageUris: generatedImages.map((image) => image.uri),
-        });
+        const savableImages = await Promise.all(
+          generatedImages.map((image) => toSavableGeneratedImage(image.uri)),
+        );
 
-        nextResultImages = savedHistory.resultImages;
+        await saveRecentCreationsUseCase({
+          name: trimmedPrompt,
+          description: "Saved from AI result",
+          prompt: trimmedPrompt,
+          model: "stability",
+          images: savableImages,
+        });
         await loadCreateHistory();
       } catch (historyError) {
-        console.error("Could not persist create history", historyError);
+        console.error("Could not sync recent creations", historyError);
       }
 
-      setResultImages(nextResultImages);
+      setResultImages(generatedImages);
+
+      try {
+        const refreshedCredits = await getCreditsUseCase();
+        setCredits(refreshedCredits.creditsRemaining);
+      } catch (creditRefreshError) {
+        console.error(
+          "Failed to refresh credits after generation",
+          creditRefreshError,
+        );
+      }
+
       await notifySuccess(
-        `Generated ${nextResultImages.length} tattoo option${
-          nextResultImages.length === 1 ? "" : "s"
+        `Generated ${generatedImages.length} tattoo option${
+          generatedImages.length === 1 ? "" : "s"
         }.`,
       );
     } catch (error) {
@@ -468,21 +537,125 @@ export default function CreateTattooScreen() {
         "Generation failed",
         error instanceof Error
           ? error.message
-          : "Could not generate the tattoo. Check that your Node server is running."
+          : "Could not generate the tattoo. Check that your Node server is running.",
       );
     } finally {
       setLoading(false);
     }
   };
 
-  const previewOnCamera = (selectedImage: GeneratedTattooOption) => {
+  const saveAiTattoo = async () => {
+    if (!selectedResultImage) return;
+    setSaving(true);
+    try {
+      const generatedImageForSave = await toSavableGeneratedImage(
+        selectedResultImage.uri,
+      );
+
+      const response = await saveAiTattooUseCase({
+        name: prompt.trim() || "AI Tattoo",
+        category: "minimal",
+        description: "Saved from AI result",
+        generatedImage: generatedImageForSave,
+        prompt: prompt.trim(),
+        model: "stability",
+      });
+
+      const responseRecord = response as Record<string, unknown>;
+      const nestedTattoo =
+        typeof responseRecord.tattoo === "object" && responseRecord.tattoo
+          ? (responseRecord.tattoo as Record<string, unknown>)
+          : null;
+      const savedIdCandidate =
+        getStringValue(responseRecord.id) ??
+        getStringValue(responseRecord.tattooId) ??
+        (nestedTattoo ? getStringValue(nestedTattoo.id) : null);
+
+      if (savedIdCandidate) {
+        const imageKey = normalizeImageUri(selectedResultImage.uri);
+        setSavedTattooIdsByImage((current) => ({
+          ...current,
+          [imageKey]: savedIdCandidate,
+        }));
+      }
+
+      await notifySuccess("Tattoo saved to catalog!");
+    } catch (error) {
+      await notifyError(
+        error instanceof Error ? error.message : "Could not save the tattoo.",
+        "Save failed",
+      );
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const previewOnCamera = async (selectedImage: GeneratedTattooOption) => {
     const tattooName = prompt.trim() || "AI Tattoo";
+    const imageKey = normalizeImageUri(selectedImage.uri);
+    let tattooId: string | null = savedTattooIdsByImage[imageKey] ?? null;
+
+    if (!tattooId) {
+      try {
+        setSaving(true);
+        const generatedImageForSave = await toSavableGeneratedImage(
+          selectedImage.uri,
+        );
+
+        const response = await saveAiTattooUseCase({
+          name: tattooName,
+          category: "minimal",
+          description: "Saved from AI result",
+          generatedImage: generatedImageForSave,
+          prompt: prompt.trim(),
+          model: "stability",
+        });
+
+        const responseRecord = response as Record<string, unknown>;
+        const nestedTattoo =
+          typeof responseRecord.tattoo === "object" && responseRecord.tattoo
+            ? (responseRecord.tattoo as Record<string, unknown>)
+            : null;
+        tattooId =
+          getStringValue(responseRecord.id) ??
+          getStringValue(responseRecord.tattooId) ??
+          (nestedTattoo ? getStringValue(nestedTattoo.id) : null);
+
+        if (tattooId) {
+          const resolvedTattooId = tattooId;
+          setSavedTattooIdsByImage((current) => ({
+            ...current,
+            [imageKey]: resolvedTattooId,
+          }));
+          await notifySuccess("Tattoo saved to catalog before preview.");
+        }
+      } catch (error) {
+        await notifyError(
+          error instanceof Error
+            ? error.message
+            : "Could not save the tattoo before preview.",
+          "Save failed",
+        );
+      } finally {
+        setSaving(false);
+      }
+    }
+
+    if (!tattooId) {
+      await notifyError(
+        "Could not save this design to catalog, so captured shots cannot sync yet.",
+        "Save required",
+      );
+      return;
+    }
+
     setSelectedTattoo(selectedImage.uri, tattooName);
 
     router.push({
       pathname: "/camera-preview",
       params: {
         tattooName,
+        tattooId: tattooId ?? undefined,
       },
     });
   };
@@ -493,10 +666,13 @@ export default function CreateTattooScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
       <ScrollView ref={scrollViewRef} contentContainerStyle={styles.container}>
         <View style={styles.hero}>
-          <Text style={styles.kicker}>AI Tattoo Generator</Text>
+          <View style={styles.heroHeader}>
+            <Text style={styles.kicker}>AI Tattoo Generator</Text>
+            <Text style={styles.creditCount}>Credits: {credits ?? "—"}</Text>
+          </View>
           <Text style={styles.title}>
             {generationMode === "text"
               ? "Create a tattoo from text."
@@ -515,12 +691,14 @@ export default function CreateTattooScreen() {
               styles.modeChip,
               generationMode === "text" ? styles.modeChipActive : null,
             ]}
-            onPress={() => switchMode("text")}>
+            onPress={() => switchMode("text")}
+          >
             <Text
               style={[
                 styles.modeChipText,
                 generationMode === "text" ? styles.modeChipTextActive : null,
-              ]}>
+              ]}
+            >
               Text To Tattoo
             </Text>
           </Pressable>
@@ -529,12 +707,14 @@ export default function CreateTattooScreen() {
               styles.modeChip,
               generationMode === "image" ? styles.modeChipActive : null,
             ]}
-            onPress={() => switchMode("image")}>
+            onPress={() => switchMode("image")}
+          >
             <Text
               style={[
                 styles.modeChipText,
                 generationMode === "image" ? styles.modeChipTextActive : null,
-              ]}>
+              ]}
+            >
               Image To Tattoo
             </Text>
           </Pressable>
@@ -552,9 +732,16 @@ export default function CreateTattooScreen() {
             <ScrollView
               horizontal
               showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.historyRow}>
+              contentContainerStyle={styles.historyRow}
+            >
               {historyItems.map((item) => {
-                const previewUri = item.resultImages[0]?.uri ?? item.referenceImageUri;
+                const previewUri = item.resultImages.find((img) =>
+                  isImageUri(img.uri),
+                )?.uri;
+
+                if (!previewUri) {
+                  return null;
+                }
 
                 return (
                   <Pressable
@@ -562,7 +749,8 @@ export default function CreateTattooScreen() {
                     style={styles.historyCard}
                     onPress={() => {
                       void restoreHistoryItem(item);
-                    }}>
+                    }}
+                  >
                     <View style={styles.historyImageWrap}>
                       {previewUri ? (
                         <Image
@@ -574,7 +762,9 @@ export default function CreateTattooScreen() {
                         />
                       ) : (
                         <View style={styles.historyPlaceholder}>
-                          <Text style={styles.historyPlaceholderText}>Prompt</Text>
+                          <Text style={styles.historyPlaceholderText}>
+                            Prompt
+                          </Text>
                         </View>
                       )}
                       <View style={styles.historyBadge}>
@@ -587,7 +777,8 @@ export default function CreateTattooScreen() {
                       {item.prompt}
                     </Text>
                     <Text style={styles.historyMeta}>
-                      {item.resultImages.length} option{item.resultImages.length === 1 ? "" : "s"}
+                      {item.resultImages.length} option
+                      {item.resultImages.length === 1 ? "" : "s"}
                     </Text>
                   </Pressable>
                 );
@@ -614,13 +805,17 @@ export default function CreateTattooScreen() {
                 ) : (
                   <View style={styles.uploadPlaceholder}>
                     <Text style={styles.uploadPlaceholderText}>
-                      Pick an image from your gallery to turn it into tattoo options.
+                      Pick an image from your gallery to turn it into tattoo
+                      options.
                     </Text>
                   </View>
                 )}
 
                 <View style={styles.uploadActions}>
-                  <Pressable style={styles.secondaryButton} onPress={pickReferenceImage}>
+                  <Pressable
+                    style={styles.secondaryButton}
+                    onPress={pickReferenceImage}
+                  >
                     <Text style={styles.secondaryButtonText}>
                       {referenceImageUri ? "Change Image" : "Upload Image"}
                     </Text>
@@ -628,7 +823,8 @@ export default function CreateTattooScreen() {
                   {referenceImageUri ? (
                     <Pressable
                       style={styles.clearButton}
-                      onPress={() => setReferenceImageUri(null)}>
+                      onPress={() => setReferenceImageUri(null)}
+                    >
                       <Text style={styles.clearButtonText}>Remove</Text>
                     </Pressable>
                   ) : null}
@@ -659,7 +855,8 @@ export default function CreateTattooScreen() {
               <Pressable
                 key={item}
                 style={styles.suggestionChip}
-                onPress={() => setPrompt(item)}>
+                onPress={() => setPrompt(item)}
+              >
                 <Text style={styles.suggestionText}>{item}</Text>
               </Pressable>
             ))}
@@ -671,7 +868,8 @@ export default function CreateTattooScreen() {
               loading ? styles.primaryButtonDisabled : null,
             ]}
             onPress={generateTattoo}
-            disabled={loading}>
+            disabled={loading}
+          >
             {loading ? (
               <ActivityIndicator color="#1D140E" />
             ) : (
@@ -689,9 +887,12 @@ export default function CreateTattooScreen() {
             style={styles.previewPanel}
             onLayout={(event) => {
               setPreviewPanelTop(event.nativeEvent.layout.y);
-            }}>
+            }}
+          >
             <Text style={styles.previewTitle}>
-              Tap A Tattoo To Preview ({resultImages.length})
+              {selectedResultImage
+                ? "1 Selected"
+                : `Tap To Select (${resultImages.length})`}
             </Text>
             <FlatList
               data={resultImages}
@@ -702,8 +903,18 @@ export default function CreateTattooScreen() {
               contentContainerStyle={styles.optionsList}
               renderItem={({ item, index }) => (
                 <Pressable
-                  style={styles.optionCard}
-                  onPress={() => previewOnCamera(item)}>
+                  style={[
+                    styles.optionCard,
+                    selectedResultImage?.id === item.id
+                      ? styles.optionCardSelected
+                      : null,
+                  ]}
+                  onPress={() =>
+                    setSelectedResultImage((prev) =>
+                      prev?.id === item.id ? null : item,
+                    )
+                  }
+                >
                   <View style={styles.optionImageWrap}>
                     <Image
                       source={{ uri: item.uri }}
@@ -719,15 +930,41 @@ export default function CreateTattooScreen() {
             />
 
             <View style={styles.actionRow}>
-              <Pressable style={styles.secondaryButton} onPress={generateTattoo}>
+              <Pressable
+                style={styles.secondaryButton}
+                onPress={generateTattoo}
+              >
                 <Text style={styles.secondaryButtonText}>Regenerate</Text>
               </Pressable>
               <Pressable
-                style={[styles.cameraButton, styles.cameraButtonDisabled]}
-                disabled>
-                <Text style={styles.cameraButtonText}>Choose An Option</Text>
+                style={[
+                  styles.cameraButton,
+                  !selectedResultImage ? styles.cameraButtonDisabled : null,
+                ]}
+                disabled={!selectedResultImage}
+                onPress={() =>
+                  selectedResultImage && previewOnCamera(selectedResultImage)
+                }
+              >
+                <Text style={styles.cameraButtonText}>Preview</Text>
               </Pressable>
             </View>
+            <Pressable
+              style={[
+                styles.saveButton,
+                !selectedResultImage || saving
+                  ? styles.saveButtonDisabled
+                  : null,
+              ]}
+              disabled={!selectedResultImage || saving}
+              onPress={saveAiTattoo}
+            >
+              {saving ? (
+                <ActivityIndicator color="#FFF8ED" />
+              ) : (
+                <Text style={styles.saveButtonText}>Save to Catalog</Text>
+              )}
+            </Pressable>
           </View>
         ) : null}
       </ScrollView>
@@ -739,14 +976,17 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: "#F7F1E8",
+    fontFamily: Fonts.fredoka,
   },
   container: {
     padding: 20,
     gap: 18,
+    fontFamily: Fonts.fredoka,
   },
   hero: {
     gap: 8,
     paddingTop: 4,
+    fontFamily: Fonts.fredoka,
   },
   modeSwitch: {
     flexDirection: "row",
@@ -754,6 +994,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     padding: 6,
     gap: 6,
+    fontFamily: Fonts.fredoka,
   },
   modeChip: {
     flex: 1,
@@ -762,40 +1003,56 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 12,
+    fontFamily: Fonts.fredoka,
+  },
+  heroHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    fontFamily: Fonts.fredoka,
   },
   modeChipActive: {
     backgroundColor: "#FFF9F2",
     borderWidth: 1,
     borderColor: "#DCCDBD",
+    fontFamily: Fonts.fredoka,
   },
   modeChipText: {
     color: "#6B5743",
     fontSize: 14,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   modeChipTextActive: {
     color: "#22160D",
+    fontFamily: Fonts.fredoka,
   },
   historySection: {
     gap: 10,
+    fontFamily: Fonts.fredoka,
   },
   historyHeader: {
     gap: 4,
+    fontFamily: Fonts.fredoka,
   },
   historyTitle: {
     color: "#24180F",
     fontSize: 18,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   historySubtitle: {
     color: "#5E5348",
     fontSize: 13,
     lineHeight: 18,
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
   },
   historyRow: {
     gap: 12,
     paddingRight: 8,
+    fontFamily: Fonts.fredoka,
   },
   historyCard: {
     width: 176,
@@ -805,6 +1062,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#E8DCCE",
     gap: 8,
+    fontFamily: Fonts.fredoka,
   },
   historyImageWrap: {
     width: "100%",
@@ -812,21 +1070,25 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     overflow: "hidden",
     backgroundColor: "#EEDFD0",
+    fontFamily: Fonts.fredoka,
   },
   historyImage: {
     width: "100%",
     height: "100%",
+    fontFamily: Fonts.fredoka,
   },
   historyPlaceholder: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#F1E3D3",
+    fontFamily: Fonts.fredoka,
   },
   historyPlaceholderText: {
     color: "#6C5848",
     fontSize: 13,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   historyBadge: {
     position: "absolute",
@@ -836,22 +1098,26 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     paddingHorizontal: 10,
     paddingVertical: 5,
+    fontFamily: Fonts.fredoka,
   },
   historyBadgeText: {
     color: "#FFF4E5",
     fontSize: 11,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   historyPrompt: {
     color: "#24180F",
     fontSize: 13,
     lineHeight: 18,
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
   },
   historyMeta: {
     color: "#7B6B5F",
     fontSize: 12,
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
   },
   kicker: {
     color: "#7D5731",
@@ -859,18 +1125,28 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     letterSpacing: 0.8,
     textTransform: "uppercase",
+    fontFamily: Fonts.fredoka,
   },
   title: {
     color: "#22160D",
     fontSize: 30,
     lineHeight: 34,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   subtitle: {
     color: "#5E5348",
     fontSize: 15,
     lineHeight: 22,
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
+  },
+  creditCount: {
+    color: "#6B5B52",
+    fontSize: 13,
+    fontFamily: Fonts.fredoka,
+    fontWeight: "700",
+    letterSpacing: 0.8,
   },
   panel: {
     backgroundColor: "#FFF9F2",
@@ -879,9 +1155,11 @@ const styles = StyleSheet.create({
     gap: 14,
     borderWidth: 1,
     borderColor: "#E8DCCE",
+    fontFamily: Fonts.fredoka,
   },
   uploadPanel: {
     gap: 12,
+    fontFamily: Fonts.fredoka,
   },
   uploadPreviewWrap: {
     width: "100%",
@@ -891,10 +1169,12 @@ const styles = StyleSheet.create({
     backgroundColor: "#D8C1A4",
     borderWidth: 1,
     borderColor: "#B39471",
+    fontFamily: Fonts.fredoka,
   },
   uploadPreview: {
     width: "100%",
     height: "100%",
+    fontFamily: Fonts.fredoka,
   },
   uploadPlaceholder: {
     minHeight: 160,
@@ -906,6 +1186,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 20,
+    fontFamily: Fonts.fredoka,
   },
   uploadPlaceholderText: {
     color: "#655548",
@@ -913,15 +1194,18 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     textAlign: "center",
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
   },
   uploadActions: {
     flexDirection: "row",
     gap: 12,
+    fontFamily: Fonts.fredoka,
   },
   label: {
     color: "#24180F",
     fontSize: 15,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   input: {
     minHeight: 124,
@@ -933,21 +1217,25 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 22,
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
   },
   suggestions: {
     gap: 10,
+    fontFamily: Fonts.fredoka,
   },
   suggestionChip: {
     backgroundColor: "#F1E3D3",
     borderRadius: 16,
     paddingHorizontal: 14,
     paddingVertical: 12,
+    fontFamily: Fonts.fredoka,
   },
   suggestionText: {
     color: "#4C3725",
     fontSize: 13,
     lineHeight: 18,
     fontWeight: "500",
+    fontFamily: Fonts.fredoka,
   },
   primaryButton: {
     minHeight: 54,
@@ -955,33 +1243,41 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#E8D1A8",
+    fontFamily: Fonts.fredoka,
   },
   primaryButtonDisabled: {
     opacity: 0.8,
+    fontFamily: Fonts.fredoka,
   },
   primaryButtonText: {
     color: "#1D140E",
     fontSize: 16,
     fontWeight: "800",
+    fontFamily: Fonts.fredoka,
   },
   previewPanel: {
     gap: 12,
+    fontFamily: Fonts.fredoka,
   },
   previewTitle: {
     color: "#24180F",
     fontSize: 20,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   previewBlend: {
     isolation: "isolate",
     mixBlendMode: "multiply",
+    fontFamily: Fonts.fredoka,
   },
   optionsList: {
     gap: 12,
+    fontFamily: Fonts.fredoka,
   },
   optionRow: {
     justifyContent: "space-between",
     gap: 12,
+    fontFamily: Fonts.fredoka,
   },
   optionCard: {
     flex: 1,
@@ -992,6 +1288,12 @@ const styles = StyleSheet.create({
     borderColor: "#E8DCCE",
     alignItems: "stretch",
     gap: 8,
+    fontFamily: Fonts.fredoka,
+  },
+  optionCardSelected: {
+    borderColor: "#7D5731",
+    borderWidth: 2,
+    backgroundColor: "#FFF4E5",
   },
   optionImageWrap: {
     width: "100%",
@@ -1003,20 +1305,24 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     overflow: "hidden",
+    fontFamily: Fonts.fredoka,
   },
   optionImage: {
     width: "100%",
     height: "100%",
+    fontFamily: Fonts.fredoka,
   },
   optionLabel: {
     color: "#5C4330",
     fontSize: 13,
     fontWeight: "700",
     textAlign: "center",
+    fontFamily: Fonts.fredoka,
   },
   actionRow: {
     flexDirection: "row",
     gap: 12,
+    fontFamily: Fonts.fredoka,
   },
   secondaryButton: {
     flex: 1,
@@ -1027,11 +1333,13 @@ const styles = StyleSheet.create({
     backgroundColor: "#FFFFFF",
     borderWidth: 1,
     borderColor: "#DCCDBD",
+    fontFamily: Fonts.fredoka,
   },
   secondaryButtonText: {
     color: "#2C2117",
     fontSize: 15,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   clearButton: {
     minHeight: 52,
@@ -1040,11 +1348,13 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: "#F1E3D3",
     paddingHorizontal: 18,
+    fontFamily: Fonts.fredoka,
   },
   clearButtonText: {
     color: "#4C3725",
     fontSize: 14,
     fontWeight: "700",
+    fontFamily: Fonts.fredoka,
   },
   cameraButton: {
     flex: 1.35,
@@ -1054,20 +1364,34 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: "#11181C",
     paddingHorizontal: 16,
+    fontFamily: Fonts.fredoka,
   },
   cameraButtonDisabled: {
     opacity: 0.6,
+    fontFamily: Fonts.fredoka,
   },
   cameraButtonText: {
     color: "#FFF8ED",
     fontSize: 15,
     fontWeight: "800",
     textAlign: "center",
+    fontFamily: Fonts.fredoka,
+  },
+  saveButton: {
+    minHeight: 54,
+    borderRadius: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#5C3A1E",
+    fontFamily: Fonts.fredoka,
+  },
+  saveButtonDisabled: {
+    opacity: 0.45,
+  },
+  saveButtonText: {
+    color: "#FFF8ED",
+    fontSize: 16,
+    fontWeight: "800",
+    fontFamily: Fonts.fredoka,
   },
 });
-
-
-
-
-
-
